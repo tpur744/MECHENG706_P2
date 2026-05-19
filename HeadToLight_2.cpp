@@ -87,8 +87,12 @@ float alignIntegral  = 0;
 unsigned long alignLastTime = 0;
 
 // ================= STATE MACHINE =================
-enum State { SCANNING, ROTATING, DRIVING, DONE };
+enum State { SCANNING, ROTATING, DRIVING, REVERSING, DONE };
 State state = SCANNING;
+
+int lightsFound = 0;
+const int totalLights = 2;
+unsigned long reverseStartTime = 0;
 
 // =====================================================
 // SETUP
@@ -168,9 +172,34 @@ void loop() {
     
     // ---------------------------------------------------
     case DRIVING:
-          driveForward();
-          break;
+      driveForward();
+      break;
 
+    // --------------------------------------------------
+    case REVERSING: {
+      updateGyro();
+
+      if (millis() - reverseStartTime < 1000) {
+        move(-150, 0, 0);
+        plotSensors();
+      } else {
+        stopMotors();
+        delay(300);
+
+        // Reset for fresh scan
+        bestSum = 0;
+        bestDriveSum = 0;
+        error_fwd = 0; prevError_fwd = 0; integral_fwd = 0;
+        alignIntegral = 0; alignPrevError = 0;
+        servoLocked = false;
+        scanServo.write(centreAngle);
+        servoAngle = centreAngle + offsetAngle;
+        servoDirection = -1;
+
+        state = SCANNING;
+      }
+      break;
+    }
 
     // --------------------------------------------------
     case DONE:
@@ -336,7 +365,7 @@ void driveForward() {
     }
   }
 
-  // ---- Stop if obstacle within 3cm ----
+  // ---- Stop if obstacle within 10cm ----
   if (dist < 10.0) {
     stopMotors();
     long time = millis();
@@ -344,7 +373,19 @@ void driveForward() {
       digitalWrite(fanPin, HIGH);  // fan on
     }
     digitalWrite(fanPin, LOW);
-    state = DONE;
+
+    lightsFound++;
+
+    // If we've found all lights, we're done
+    if (lightsFound >= totalLights) {
+      state = DONE;
+      return;
+    }
+
+    // Sit at the light for 10 seconds, then reverse
+    delay(5000);
+    reverseStartTime = millis();
+    state = REVERSING;
     return;
   }
 
@@ -521,13 +562,6 @@ void LED(const char* action, const char* color) {
 }
 
 // ─── LED Number Display ────────────────────────────────────────────────────────
-// Displays a value as a 4-bit binary number across the 4 LEDs.
-// MSB = Yellow (bit3/8), Green (bit2/4), Blue (bit1/2), LSB = Red (bit0/1)
-// The value is floor-divided into the largest expressible 4-bit representation.
-// e.g. LED_Number(128, 96)  -> binary 0110 -> Green ON, Blue ON
-//      LED_Number(128, 97)  -> same (97 floor = 96 in this scale)
-//      LED_Number(128, 255) -> binary 1111 -> all ON
-//      LED_Number(128, 0)   -> binary 0000 -> all OFF
 void LED_Number(float maxBit, int var) {
   if (var < 0)      var = 0;
 
