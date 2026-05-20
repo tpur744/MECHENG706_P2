@@ -179,7 +179,7 @@ void loop() {
     case REVERSING: {
       updateGyro();
 
-      if (millis() - reverseStartTime < 1000) {
+      if (millis() - reverseStartTime < 500) {
         move(-150, 0, 0);
         plotSensors();
       } else {
@@ -324,7 +324,7 @@ bool rotateToHeading(float target) {
     return true;
   }
 
-  int rotateSpeed = (absErr > (30.0 * PI / 180.0)) ? 250 : 100;
+  int rotateSpeed = (absErr > (40.0 * PI / 180.0)) ? 250 : 100;
   move(0, 0, -dir * rotateSpeed);  // ← direction applied here
 
   delay(20);
