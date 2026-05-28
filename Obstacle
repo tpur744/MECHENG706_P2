@@ -61,7 +61,7 @@ const int FRONT_LEFT_IR = A14, FRONT_RIGHT_IR = A15;
 // SERVO
 // =====================================================
 Servo scanServo;
-const int centreAngle = 120, offsetAngle = 30, servoStep = 2, servoDelay = 20;
+const int centreAngle = 120, offsetAngle = 30, servoStep = 3, servoDelay = 20;
 
 int servoAngle = centreAngle + offsetAngle;
 int servoDirection = -1;
@@ -324,58 +324,74 @@ void loop() {
     scanServo.write(servoAngle);
   }
 
+  LED("off", "orange");
+  LED("off", "green");
+  LED("off", "blue");
+  LED("off", "red");
+
    // ── Strafe Decision Logic ───────────────────────────────────────
   String movementCommand = "FORWARD";
+  LED("on", "green");
 
   if (obstacleDetected) {
     // Left side blocked → move right
-    if (obstacleSide == -1) {
+    if (obstacleSide == -1 || servoAngle > centreAngle + 1) {
       movementCommand = "STRAFE RIGHT";
+      LED("on", "orange");
+
     }
     // Right side blocked → move left
-    else if (obstacleSide == 1) {
+    else if (obstacleSide == 1||servoAngle < centreAngle - 1) {
       movementCommand = "STRAFE LEFT";
+      LED("on", "blue");
     }
     // Both blocked
     else {
       // Very close object ahead
       if (ultrasonicClose) {
         movementCommand = "REVERSE";
+        LED("on", "red");
+
       }
       else {
         // Compare IR strengths to pick clearer side
         if (frontLeftAvg > frontRightAvg) {
           movementCommand = "STRAFE RIGHT";
+          LED("on", "orange");
+
         }
         else if (frontRightAvg > frontLeftAvg) {
           movementCommand = "STRAFE LEFT";
+          LED("on", "blue");
         }
         else {
           movementCommand = "STOP";
+          LED("on", "green");
+
         }
       }
     }
-  }
+  
 
   // ── Print ─────────────────────────────────────────────────────────
-  Serial.print("Servo: ");        Serial.print(servoAngle);
-  Serial.print("  Mode: ");
-  if      (!obstacleDetected)  Serial.print("SWEEPING   ");
-  else if (obstacleSide ==  0) Serial.print("HOLD       ");
-  else if (obstacleSide == -1) Serial.print("SNAP LEFT  ");
-  else                         Serial.print("SNAP RIGHT ");
-  Serial.print("  Dist: ");      Serial.print(dist);
-  Serial.print("cm  L_IR: ");    Serial.print(frontLeftAvg);
-  Serial.print("  R_IR: ");      Serial.print(frontRightAvg);
-  Serial.print("  ObstacleSide: ");
-  if      (obstacleSide == -1) Serial.print("LEFT ");
-  else if (obstacleSide ==  1) Serial.print("RIGHT");
-  else                         Serial.print("NONE ");
-  Serial.print("  >> ");
-  Serial.println(obstacleDetected ? "OBSTACLE" : "CLEAR");
-  Serial.print("  Move: ");
-  Serial.print(movementCommand);
-
+  // Serial.print("Servo: ");        Serial.print(servoAngle);
+  // Serial.print("  Mode: ");
+  // if      (!obstacleDetected)  Serial.print("SWEEPING   ");
+  // else if (obstacleSide ==  0) Serial.print("HOLD       ");
+  // else if (obstacleSide == -1) Serial.print("SNAP LEFT  ");
+  // else                         Serial.print("SNAP RIGHT ");
+  // Serial.print("  Dist: ");      Serial.print(dist);
+  // Serial.print("cm  L_IR: ");    Serial.print(frontLeftAvg);
+  // Serial.print("  R_IR: ");      Serial.print(frontRightAvg);
+  // Serial.print("  ObstacleSide: ");
+  // if      (obstacleSide == -1) Serial.print("LEFT ");
+  // else if (obstacleSide ==  1) Serial.print("RIGHT");
+  // else                         Serial.print("NONE ");
+  // Serial.print("  >> ");
+  // Serial.println(obstacleDetected ? "OBSTACLE" : "CLEAR");
+  // Serial.print("  Move: ");
+  // Serial.print(movementCommand);
+  }
   delay(20);
 }
 
