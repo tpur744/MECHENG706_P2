@@ -1,0 +1,1011 @@
+// =====================================================
+// HEAD TO LIGHT — redesigned
+// =====================================================
+
+#include <Servo.h>
+#include <Adafruit_BNO08x.h>
+
+// =====================================================
+// PID STRUCT (replaces 4 sets of repeated PID globals)
+// =====================================================
+struct PID {
+  float Kp, Ki, Kd;
+  float integral = 0, prevError = 0;
+  unsigned long lastTime = 0;
+
+  float compute(float error) {
+    unsigned long now = millis();
+    float dt = (now - lastTime) / 1000.0;
+    if (dt <= 0) return 0;
+    integral += error * dt;
+    float derivative = (error - prevError) / dt;
+    float out = Kp * error + Ki * integral + Kd * derivative;
+    prevError = error;
+    lastTime = now;
+    return out;
+  }
+
+  void reset() {
+    integral = 0;
+    prevError = 0;
+    lastTime = millis();
+  }
+};
+
+PID pidForward;
+PID pidStrafeR;
+PID pidStrafeL;
+
+// =====================================================
+// PINS
+// =====================================================
+const int trigPin = 48, echoPin = 49;
+const int fanPin = 22;
+const int servoPin = 9;
+
+const byte left_front = 46, left_rear = 47;
+const byte right_rear = 50, right_front = 51;
+
+const int sensor1 = A8, sensor2 = A9;
+const int sensor3 = A10, sensor4 = A11;
+
+const int LEFT_IR = A12, RIGHT_IR = A13;
+const int FRONT_LEFT_IR = A14, FRONT_RIGHT_IR = A15;
+
+#define LED_ORANGE 10
+#define LED_GREEN 11
+#define LED_BLUE 12
+#define LED_RED 13
+
+// =====================================================
+// SERVO
+// =====================================================
+Servo scanServo;
+const int centreAngle = 120, offsetAngle = 30, servoStep = 2, servoDelay = 20;
+
+int servoAngle = centreAngle + offsetAngle;
+int servoDirection = -1;
+bool servoLocked = false;
+unsigned long lastServoTime = 0;
+
+// =====================================================
+// MOTORS
+// =====================================================
+Servo leftFrontMotor, leftRearMotor, rightRearMotor, rightFrontMotor;
+const int speedVal = 250;
+
+// =====================================================
+// GYRO
+// =====================================================
+Adafruit_BNO08x bno08x(-1);
+sh2_SensorValue_t sensorValue;
+
+float gyroZ = 0, heading = 0;
+unsigned long lastGyroTime = 0;
+
+// =====================================================
+// IR — exponential moving average
+// =====================================================
+const float IR_alpha = 0.5;
+float leftAvg = 0, rightAvg = 0, frontLeftAvg = 0, frontRightAvg = 0;
+
+const float FRONT_IR_OBSTACLE_THRESHOLD = 1.0;
+
+float getIRDistance(float avg, float a, float b) {
+  return a / (avg - b);
+}
+float getLeftDistance() {
+  return getIRDistance(leftAvg, 13.61, 0.469);
+}
+float getRightDistance() {
+  return getIRDistance(rightAvg, 17.85, 0.33);
+}
+
+// =====================================================
+// SCAN RESULTS / DRIVE TRACKING
+// =====================================================
+float bestHeading = 0, bestDriveHeading = 0;
+int bestSum = 0, bestDriveSum = 0;
+
+
+// =====================================================
+// STATE MACHINE
+// =====================================================
+// Sub-states for strafe and rescan replace boolean soup.
+enum State {
+  SCANNING,
+  ROTATING,
+  DRIVING,
+  STRAFING,        // phase 1: move sideways until front IRs clear
+  STRAFE_COAST,    // phase 2: wait POST_STRAFE_FORWARD_MS with IRs clear
+  STRAFE_FORWARD,  // phase 3: short forward burst
+  RESCAN_SWEEP,    // phase 4: rotate through ±60° arc
+  RESCAN_ROTATE,   // phase 5: rotate to best heading found
+  REVERSING,
+  DONE
+};
+State state = DRIVING;
+
+int lightsFound = 0;
+const int totalLights = 2;
+
+// =====================================================
+// STRAFE STATE
+// =====================================================
+struct StrafeState {
+  int dir = 1;  // +1 right, -1 left
+  float targetHeading = 0;
+  unsigned long startTime = 0;
+  unsigned long coastStart = 0;
+  unsigned long forwardStart = 0;
+};
+StrafeState strafe;
+
+// Replace your two constants with three:
+const unsigned long STRAFE_DURATION_MS = 4000;
+const unsigned long POST_STRAFE_COAST_MS = 300;      // time clear of obstacle before committing
+const unsigned long STRAFE_FORWARD_BURST_MS = 1000;  // forward drive after strafing
+
+// =====================================================
+// RESCAN STATE
+// =====================================================
+struct RescanState {
+  float sweepStart = 0;
+  float sweepBestSum = 0;
+  float sweepBestHeading = 0;
+  int sweepDir = 0;
+};
+RescanState rescan;
+
+const float sweepRange = 60.0 * PI / 180.0;
+
+// =====================================================
+// REVERSE STATE
+// =====================================================
+unsigned long reverseStartTime = 0;
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup() {
+  pinMode(fanPin, OUTPUT);
+  digitalWrite(fanPin, LOW);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  Serial.begin(115200);
+  LED_Setup();
+
+  scanServo.attach(servoPin);
+  scanServo.write(centreAngle);
+
+  pinMode(sensor1, INPUT);
+  pinMode(sensor2, INPUT);
+  pinMode(sensor3, INPUT);
+  pinMode(sensor4, INPUT);
+  pinMode(LEFT_IR, INPUT);
+  pinMode(RIGHT_IR, INPUT);
+  pinMode(FRONT_LEFT_IR, INPUT);
+  pinMode(FRONT_RIGHT_IR, INPUT);
+
+  leftFrontMotor.attach(left_front);
+  leftRearMotor.attach(left_rear);
+  rightRearMotor.attach(right_rear);
+  rightFrontMotor.attach(right_front);
+  delay(100);
+  stopMotors();
+
+  pidForward.Kp = 75.0;
+  pidForward.Ki = 0.02;
+  pidForward.Kd = 0.0;
+  pidStrafeR.Kp = 260.0;
+  pidStrafeR.Ki = 0.005;
+  pidStrafeR.Kd = 0.0;
+  pidStrafeL.Kp = 500.0;
+  pidStrafeL.Ki = 100.0;
+  pidStrafeL.Kd = 100.0;
+
+  if (!bno08x.begin_I2C()) {
+    Serial.println("IMU FAIL");
+    while (1)
+      ;
+  }
+
+  useGyroIntegration();
+  delay(200);
+  warmupIR();
+
+  pidForward.reset();
+  pidStrafeR.reset();
+  pidStrafeL.reset();
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+// void loop() {
+//   updateGyro();
+//   updateIR();
+
+//   switch (state) {
+
+//     case SCANNING:
+//       scanForLight();
+//       stopMotors();
+//       delay(300);
+//       pidForward.reset();
+//       bestDriveHeading = bestHeading;
+//       bestDriveSum     = 0;
+//       state = ROTATING;
+//       break;
+
+//     case ROTATING:
+//       if (rotateToHeading(bestHeading)) {
+//         delay(200);
+//         state = DRIVING;
+//       }
+//       break;
+
+//     case DRIVING:      driveForwardV2(); break;
+//     case STRAFING:     doStrafe();     break;
+//     case STRAFE_COAST: doStrafe();     break;
+//     case STRAFE_FORWARD: doStrafe();   break;
+//     case RESCAN_SWEEP: doRescan();     break;
+//     case RESCAN_ROTATE: doRescan();    break;
+
+//     case REVERSING:
+//       if (millis() - reverseStartTime < 1000) {
+//         move(-150, 0, 0);
+//         plotSensors();
+//       } else {
+//         stopMotors();
+//         delay(300);
+//         bestSum = bestDriveSum = 0;
+//         pidForward.reset();
+//         servoLocked    = false;
+//         scanServo.write(centreAngle);
+//         servoAngle     = centreAngle + offsetAngle;
+//         servoDirection = -1;
+//         state = SCANNING;
+//       }
+//       break;
+
+//     case DONE:
+//       stopMotors();
+//       plotSensors();
+//       delay(20);
+//       break;
+//   }
+// }
+
+void loop() {
+  updateGyro();
+  updateIR();
+
+  float dist = getDistance();
+  bool leftIR = (frontLeftAvg > FRONT_IR_OBSTACLE_THRESHOLD);
+  bool rightIR = (frontRightAvg > FRONT_IR_OBSTACLE_THRESHOLD);
+  bool ultrasonicClose = (dist < 15.0);
+
+  static int obstacleSide = 0;
+  if      (leftIR && !rightIR)  obstacleSide = -1;
+  else if (rightIR && !leftIR)  obstacleSide =  1;
+  else if (leftIR && rightIR)   obstacleSide =  0;
+  else if (!leftIR && !rightIR) obstacleSide =  0;
+
+  bool obstacleDetected = leftIR || rightIR || ultrasonicClose;
+
+  // ── Servo sweep / track ───────────────────────────────────────────
+  unsigned long now = millis();
+  if (now - lastServoTime >= (obstacleDetected ? servoDelay / 4 : servoDelay)) {
+    lastServoTime = now;
+
+    if (obstacleDetected && obstacleSide != 0) {
+      // Jump directly to the obstacle side
+      servoAngle = (obstacleSide == -1)
+                 ? centreAngle + offsetAngle   // snap hard left
+                 : centreAngle - offsetAngle;  // snap hard right
+      // Update direction so sweep resumes correctly after clearing
+      servoDirection = (obstacleSide == -1) ? -1 : +1;
+    } else if (obstacleDetected && obstacleSide == 0) {
+      // Both IR triggered — hold position
+    } else {
+      // No obstacle — sweep normally
+      servoAngle += servoDirection * servoStep;
+      if (servoAngle <= centreAngle - offsetAngle) {
+        servoAngle     = centreAngle - offsetAngle;
+        servoDirection = +1;
+      } else if (servoAngle >= centreAngle + offsetAngle) {
+        servoAngle     = centreAngle + offsetAngle;
+        servoDirection = -1;
+      }
+    }
+
+    scanServo.write(servoAngle);
+  }
+
+   // ── Strafe Decision Logic ───────────────────────────────────────
+  String movementCommand = "FORWARD";
+
+  if (obstacleDetected) {
+    // Left side blocked → move right
+    if (obstacleSide == -1) {
+      movementCommand = "STRAFE RIGHT";
+    }
+    // Right side blocked → move left
+    else if (obstacleSide == 1) {
+      movementCommand = "STRAFE LEFT";
+    }
+    // Both blocked
+    else {
+      // Very close object ahead
+      if (ultrasonicClose) {
+        movementCommand = "REVERSE";
+      }
+      else {
+        // Compare IR strengths to pick clearer side
+        if (frontLeftAvg > frontRightAvg) {
+          movementCommand = "STRAFE RIGHT";
+        }
+        else if (frontRightAvg > frontLeftAvg) {
+          movementCommand = "STRAFE LEFT";
+        }
+        else {
+          movementCommand = "STOP";
+        }
+      }
+    }
+  }
+
+  // ── Print ─────────────────────────────────────────────────────────
+  Serial.print("Servo: ");        Serial.print(servoAngle);
+  Serial.print("  Mode: ");
+  if      (!obstacleDetected)  Serial.print("SWEEPING   ");
+  else if (obstacleSide ==  0) Serial.print("HOLD       ");
+  else if (obstacleSide == -1) Serial.print("SNAP LEFT  ");
+  else                         Serial.print("SNAP RIGHT ");
+  Serial.print("  Dist: ");      Serial.print(dist);
+  Serial.print("cm  L_IR: ");    Serial.print(frontLeftAvg);
+  Serial.print("  R_IR: ");      Serial.print(frontRightAvg);
+  Serial.print("  ObstacleSide: ");
+  if      (obstacleSide == -1) Serial.print("LEFT ");
+  else if (obstacleSide ==  1) Serial.print("RIGHT");
+  else                         Serial.print("NONE ");
+  Serial.print("  >> ");
+  Serial.println(obstacleDetected ? "OBSTACLE" : "CLEAR");
+  Serial.print("  Move: ");
+  Serial.print(movementCommand);
+
+  delay(20);
+}
+
+// =====================================================
+// OBSTACLE HELPER
+// =====================================================
+bool frontIRObstacleDetected() {
+  //LED("on", "orange"); LED("on", "red");
+  // Serial.println(frontLeftAvg);
+  // Serial.println(frontRightAvg);
+  return (frontLeftAvg > FRONT_IR_OBSTACLE_THRESHOLD || frontRightAvg > FRONT_IR_OBSTACLE_THRESHOLD);
+}
+
+// =====================================================
+// STRAFE — all sub-phases in one function, driven by state
+// =====================================================
+// void doStrafe() {
+//   updateGyro();
+//   unsigned long now = millis();
+
+//   // ── Phase 3: drive forward toward best heading ──────────────────────────
+//   if (state == STRAFE_FORWARD) {
+//     if (now - strafe.forwardStart >= STRAFE_FORWARD_BURST_MS) {
+//       stopMotors();
+//       delay(200);
+//       // Seed rescan toward best known light heading
+//       rescan.sweepBestSum = 0;
+//       rescan.sweepBestHeading = bestDriveHeading;
+//       float diff = wrapAngle(bestDriveHeading - heading);
+//       rescan.sweepDir = (diff >= 0) ? 1 : -1;
+//       rescan.sweepStart = heading;
+//       pidForward.reset();
+//       pidStrafeR.reset();
+//       pidStrafeL.reset();
+//       state = RESCAN_SWEEP;
+//     } else {
+//       // Drive forward with heading correction toward best light heading
+//       int correction = (int)pidForward.compute(wrapAngle(bestDriveHeading - heading));
+//       move(speedVal, 0, 0);
+//     }
+//     return;
+//   }
+
+//   // ── Phase 2: coast — obstacle cleared, wait to confirm it's really gone ─
+//   if (state == STRAFE_COAST) {
+//     if (frontIRObstacleDetected()) {
+//       // Obstacle came back — resume strafing
+//       state = STRAFING;
+//       return;
+//     }
+//     if (now - strafe.coastStart >= POST_STRAFE_COAST_MS) {
+//       stopMotors();
+//       delay(100);
+//       strafe.forwardStart = millis();
+//       state = STRAFE_FORWARD;
+//     }
+//     // Keep strafing sideways while coasting so we don't stop mid-obstacle
+//     int correction = (strafe.dir > 0)
+//                        ? (int)pidStrafeR.compute(wrapAngle(strafe.targetHeading - heading))
+//                        : (int)pidStrafeL.compute(wrapAngle(strafe.targetHeading - heading));
+//     move(0, strafe.dir * speedVal, correction);
+//     return;
+//   }
+
+//   // ── Phase 1: active strafing ─────────────────────────────────────────────
+//   bool timedOut = (now - strafe.startTime >= STRAFE_DURATION_MS);
+
+//   if (!frontIRObstacleDetected()) {
+//     strafe.coastStart = now;
+//     state = STRAFE_COAST;
+//     return;
+//   }
+
+//   if (timedOut) {
+//     // Gave up strafing — just go forward and let rescan sort it out
+//     stopMotors();
+//     delay(100);
+//     strafe.forwardStart = millis();
+//     state = STRAFE_FORWARD;
+//     return;
+//   }
+
+//   // Strafe sideways with PID heading correction to avoid spinning
+//   int correction = (strafe.dir > 0)
+//                      ? (int)pidStrafeR.compute(wrapAngle(strafe.targetHeading - heading))
+//                      : (int)pidStrafeL.compute(wrapAngle(strafe.targetHeading - heading));
+//   move(0, strafe.dir * speedVal, correction);
+// }
+void doStrafe() {
+  updateGyro();
+  updateIR();
+
+  unsigned long now = millis();
+  bool leftIR  = (frontLeftAvg  > FRONT_IR_OBSTACLE_THRESHOLD);
+  bool rightIR = (frontRightAvg > FRONT_IR_OBSTACLE_THRESHOLD);
+  float dist   = getDistance();
+  bool ultrasonicClose = (dist < 15.0);
+  bool obstacleDetected = leftIR || rightIR || ultrasonicClose;
+
+  // ── Phase 3: forward burst after clearing ────────────────────────
+  if (state == STRAFE_FORWARD) {
+    if (now - strafe.forwardStart >= STRAFE_FORWARD_BURST_MS) {
+      stopMotors(); delay(200);
+      rescan.sweepBestSum     = 0;
+      rescan.sweepBestHeading = bestDriveHeading;
+      float diff = wrapAngle(bestDriveHeading - heading);
+      rescan.sweepDir   = (diff >= 0) ? 1 : -1;
+      rescan.sweepStart = heading;
+      pidForward.reset(); pidStrafeR.reset(); pidStrafeL.reset();
+      state = RESCAN_SWEEP;
+    } else {
+      move(speedVal, 0, (int)pidForward.compute(wrapAngle(bestDriveHeading - heading)));
+    }
+    return;
+  }
+
+  // ── Active strafing — keep going until obstacle clears ───────────
+  if (!obstacleDetected) {
+    // Obstacle clear — short coast then forward burst
+    if (state != STRAFE_COAST) {
+      strafe.coastStart = now;
+      state = STRAFE_COAST;
+    }
+  }
+
+  if (state == STRAFE_COAST) {
+    if (obstacleDetected) {
+      // Obstacle came back — resume strafing
+      state = STRAFING;
+    } else if (now - strafe.coastStart >= POST_STRAFE_COAST_MS) {
+      stopMotors(); delay(100);
+      strafe.forwardStart = millis();
+      state = STRAFE_FORWARD;
+      return;
+    }
+    // Keep moving sideways during coast
+    int correction = (strafe.dir > 0)
+      ? (int)pidStrafeR.compute(wrapAngle(strafe.targetHeading - heading))
+      : (int)pidStrafeL.compute(wrapAngle(strafe.targetHeading - heading));
+    move(0, strafe.dir * speedVal, correction);
+    return;
+  }
+
+  // Still obstructed — keep strafing
+  Serial.print("Strafing... L_IR="); Serial.print(frontLeftAvg);
+  Serial.print(" R_IR=");            Serial.print(frontRightAvg);
+  Serial.print(" Dist=");            Serial.println(dist);
+
+  int correction = (strafe.dir > 0)
+    ? (int)pidStrafeR.compute(wrapAngle(strafe.targetHeading - heading))
+    : (int)pidStrafeL.compute(wrapAngle(strafe.targetHeading - heading));
+  move(0, strafe.dir * speedVal, correction);
+}
+// =====================================================
+// RESCAN — ±60° sweep then rotate to best heading
+// =====================================================
+void doRescan() {
+  updateGyro();
+
+  if (state == RESCAN_ROTATE) {
+    if (rotateToHeading(rescan.sweepBestHeading)) {
+      bestHeading = bestDriveHeading = rescan.sweepBestHeading;
+      bestDriveSum = 0;
+      servoLocked = false;
+      scanServo.write(centreAngle);
+      servoAngle = centreAngle + offsetAngle;
+      servoDirection = -1;
+      state = DRIVING;
+    }
+    return;
+  }
+
+  // RESCAN_SWEEP — track cumulative signed rotation from sweep start
+  float rotated = wrapAngle(heading - rescan.sweepStart);
+  int sum = analogRead(sensor1) + analogRead(sensor2)
+            + analogRead(sensor3) + analogRead(sensor4);
+
+  if (sum > rescan.sweepBestSum) {
+    rescan.sweepBestSum = sum;
+    rescan.sweepBestHeading = heading;
+  }
+
+  LED_Number(2000, sum);
+  plotSensors();
+
+  // sweepDir: +1 means we rotate positive (CCW), -1 means CW
+  // Check if we've swept the full ±sweepRange in our direction
+  float signedRotated = rotated * rescan.sweepDir;  // positive when moving in intended dir
+  if (signedRotated >= sweepRange) {
+    stopMotors();
+    delay(100);
+    state = RESCAN_ROTATE;
+    return;
+  }
+
+  // Fix: match sign to your move() convention
+  // Positive sweepDir = rotate CCW = negative rotate param (or positive, test this)
+  move(0, 0, -rescan.sweepDir * 150);
+  delay(20);
+}
+
+// =====================================================
+// TRIGGER STRAFE
+// =====================================================
+void triggerStrafe() {
+  float leftDist = getLeftDistance();
+  float rightDist = getRightDistance();
+  Serial.print("Obstacle! L=");
+  Serial.print(leftDist);
+  Serial.print("cm  R=");
+  Serial.println(rightDist);
+
+  strafe.dir = (leftDist > rightDist) ? -1 : 1;
+  strafe.targetHeading = heading;
+  strafe.startTime = millis();
+
+  pidStrafeR.reset();
+  pidStrafeL.reset();
+  stopMotors();
+  delay(100);
+  state = STRAFING;
+}
+
+// =====================================================
+// 360° SCAN
+// =====================================================
+void scanForLight() {
+  int rotateSpeed = 220;
+  bestSum = 0;
+  bestHeading = heading;
+
+  float lastHeading = heading, totalRotated = 0.0;
+  unsigned long scanStart = millis();
+
+  while (totalRotated < 2 * PI) {
+    updateGyro();
+    if (millis() - scanStart > 6000) {
+      Serial.println("SCAN TIMEOUT");
+      break;
+    }
+    if (totalRotated > (330.0 * PI / 180.0)) rotateSpeed = 80;
+
+    move(0, 0, -rotateSpeed);
+
+    int sum = analogRead(sensor1) + analogRead(sensor2)
+              + analogRead(sensor3) + analogRead(sensor4);
+    LED_Number(2000, sum);
+
+    if (sum > bestSum) {
+      bestSum = sum;
+      bestHeading = heading;
+    }
+
+    plotSensors();
+
+    float delta = wrapAngle(heading - lastHeading);
+    if (abs(delta) > 0.001) totalRotated += abs(delta);
+    lastHeading = heading;
+    delay(20);
+  }
+
+  stopMotors();
+  bestHeading = wrapAngle(bestHeading);
+}
+
+// =====================================================
+// ROTATE TO HEADING
+// =====================================================
+bool rotateToHeading(float target) {
+  updateGyro();
+  float err = wrapAngle(target - heading);
+
+  plotSensors();
+  LED_Number(0.1, abs(err));
+
+  if (abs(err) < (3.0 * PI / 180.0)) {
+    stopMotors();
+    return true;
+  }
+
+  int rotateSpeed = (abs(err) > (30.0 * PI / 180.0)) ? 250 : 100;
+  move(0, 0, -(err > 0 ? 1 : -1) * rotateSpeed);
+  delay(20);
+  return false;
+}
+
+// =====================================================
+// DRIVE FORWARD
+// =====================================================
+void driveForward() {
+  updateGyro();
+
+  float dist = getDistance();
+  int angleFromCentre = servoAngle - centreAngle;
+
+  // Servo scan / lock
+  if (!servoLocked && dist < 30.0 && abs(angleFromCentre) < 3) {
+    servoLocked = true;
+    scanServo.write(centreAngle);
+  }
+  if (!servoLocked) {
+    unsigned long now = millis();
+    if (now - lastServoTime >= servoDelay) {
+      lastServoTime = now;
+      servoAngle += servoDirection * servoStep;
+      if (servoAngle <= centreAngle - offsetAngle) {
+        servoAngle = centreAngle - offsetAngle;
+        servoDirection = +1;
+      } else if (servoAngle >= centreAngle + offsetAngle) {
+        servoAngle = centreAngle + offsetAngle;
+        servoDirection = -1;
+      }
+      scanServo.write(servoAngle);
+    }
+  }
+
+
+
+  // LED indicators
+  int thr = 900;
+  if (analogRead(sensor1) > thr) {
+    LED("on", "orange");
+  } else LED("off", "orange");
+  if (analogRead(sensor1) > thr) {
+    LED("on", "green");
+  } else LED("off", "green");
+  if (analogRead(sensor1) > thr) {
+    LED("on", "blue");
+  } else LED("off", "blue");
+  if (analogRead(sensor1) > thr) {
+    LED("on", "red");
+  } else LED("off", "red");
+
+  // Obstacle check
+  int maxSensor = max(max(analogRead(sensor1), analogRead(sensor2)),
+                      max(analogRead(sensor3), analogRead(sensor4)));
+  bool lightInView = (maxSensor > thr);
+  bool frontIRClose = frontIRObstacleDetected();
+  bool ultrasonicClose = (dist < 15.0);
+
+  if ((ultrasonicClose || frontIRClose) && !lightInView) {
+    triggerStrafe();
+    return;
+  }
+
+  // Update best drive heading via servo offset
+  int sum = analogRead(sensor1) + analogRead(sensor2)
+            + analogRead(sensor3) + analogRead(sensor4);
+  if (sum > bestDriveSum) {
+    bestDriveSum = sum;
+    float offsetRad = (servoAngle - centreAngle) * (PI / 180.0);
+    bestDriveHeading = wrapAngle(heading + offsetRad);
+  }
+  bestDriveSum = bestDriveSum * 0.995;
+
+  move(200, 0, (int)pidForward.compute(wrapAngle(bestDriveHeading - heading)));
+  plotSensors();
+
+  // Final stop
+  if (dist < 15.0 && lightInView) {
+    stopMotors();
+    unsigned long t = millis();
+    while (millis() - t < 3000) digitalWrite(fanPin, HIGH);
+    digitalWrite(fanPin, LOW);
+    lightsFound++;
+    if (lightsFound >= totalLights) {
+      state = DONE;
+      return;
+    }
+    delay(5000);
+    reverseStartTime = millis();
+    state = REVERSING;
+    return;
+  }
+}
+void driveForwardV2() {
+  updateGyro();
+  updateIR();
+
+  float dist   = getDistance();
+  bool leftIR  = (frontLeftAvg  > FRONT_IR_OBSTACLE_THRESHOLD);
+  bool rightIR = (frontRightAvg > FRONT_IR_OBSTACLE_THRESHOLD);
+  bool ultrasonicClose = (dist < 15.0);
+
+  // ── Obstacle side tracking ────────────────────────────────────────
+  static int obstacleSide = 0;
+  if      (leftIR && !rightIR)  obstacleSide = -1;
+  else if (rightIR && !leftIR)  obstacleSide =  1;
+  else if (leftIR && rightIR)   obstacleSide =  0;
+  else if (!leftIR && !rightIR) obstacleSide =  0;
+
+  bool obstacleDetected = leftIR || rightIR || ultrasonicClose;
+
+  // ── Servo sweep / snap ────────────────────────────────────────────
+  if (!servoLocked) {
+    unsigned long now = millis();
+    if (now - lastServoTime >= (obstacleDetected ? servoDelay / 4 : servoDelay)) {
+      lastServoTime = now;
+
+      if (obstacleDetected && obstacleSide != 0) {
+        servoAngle     = (obstacleSide == -1) ? centreAngle + offsetAngle
+                                              : centreAngle - offsetAngle;
+        servoDirection = (obstacleSide == -1) ? -1 : +1;
+      } else if (obstacleDetected && obstacleSide == 0) {
+        // Both IR — hold position
+      } else {
+        servoAngle += servoDirection * servoStep;
+        if (servoAngle <= centreAngle - offsetAngle) {
+          servoAngle     = centreAngle - offsetAngle;
+          servoDirection = +1;
+        } else if (servoAngle >= centreAngle + offsetAngle) {
+          servoAngle     = centreAngle + offsetAngle;
+          servoDirection = -1;
+        }
+      }
+      scanServo.write(servoAngle);
+    }
+  }
+
+  // Lock servo if close and centred
+  if (!servoLocked && dist < 30.0 && abs(servoAngle - centreAngle) < 3) {
+    servoLocked = true;
+    scanServo.write(centreAngle);
+  }
+
+  // ── Light sensors ─────────────────────────────────────────────────
+  int thr = 900;
+  int maxSensor = max(max(analogRead(sensor1), analogRead(sensor2)),
+                      max(analogRead(sensor3), analogRead(sensor4)));
+  bool lightInView = (maxSensor > thr);
+
+  // ── LED indicators ────────────────────────────────────────────────
+  LED(analogRead(sensor1) > thr ? "on" : "off", "orange");
+  LED(analogRead(sensor2) > thr ? "on" : "off", "green");
+  LED(analogRead(sensor3) > thr ? "on" : "off", "blue");
+  LED(analogRead(sensor4) > thr ? "on" : "off", "red");
+
+  // ── Obstacle → strafe ─────────────────────────────────────────────
+  if (obstacleDetected && !lightInView) {
+    Serial.print("Obstacle! L_IR="); Serial.print(frontLeftAvg);
+    Serial.print(" R_IR=");          Serial.print(frontRightAvg);
+    Serial.print(" Dist=");          Serial.print(dist);
+    Serial.print(" Side=");
+    if      (obstacleSide == -1) Serial.println("LEFT");
+    else if (obstacleSide ==  1) Serial.println("RIGHT");
+    else                         Serial.println("BOTH");
+    triggerStrafe();
+    return;
+  }
+
+  // ── Update best drive heading via servo offset ────────────────────
+  int sum = analogRead(sensor1) + analogRead(sensor2)
+          + analogRead(sensor3) + analogRead(sensor4);
+  if (sum > bestDriveSum) {
+    bestDriveSum     = sum;
+    float offsetRad  = (servoAngle - centreAngle) * (PI / 180.0);
+    bestDriveHeading = wrapAngle(heading + offsetRad);
+  }
+  bestDriveSum *= 0.995;
+
+  move(200, 0, (int)pidForward.compute(wrapAngle(bestDriveHeading - heading)));
+  plotSensors();
+
+  // ── Final approach ────────────────────────────────────────────────
+  if (dist < 15.0 && lightInView) {
+    stopMotors();
+    unsigned long t = millis();
+    while (millis() - t < 3000) digitalWrite(fanPin, HIGH);
+    digitalWrite(fanPin, LOW);
+    lightsFound++;
+    if (lightsFound >= totalLights) { state = DONE; return; }
+    delay(5000);
+    reverseStartTime = millis();
+    state = REVERSING;
+    return;
+  }
+}
+// =====================================================
+// HELPERS
+// =====================================================
+float wrapAngle(float a) {
+  while (a > PI) a -= 2 * PI;
+  while (a < -PI) a += 2 * PI;
+  return a;
+}
+
+void plotSensors() {
+  int v1 = analogRead(sensor1), v2 = analogRead(sensor2);
+  int v3 = analogRead(sensor3), v4 = analogRead(sensor4);
+  int sum = v1 + v2 + v3 + v4;
+  Serial.print("S1:");
+  Serial.print(v1);
+  Serial.print(" S2:");
+  Serial.print(v2);
+  Serial.print(" S3:");
+  Serial.print(v3);
+  Serial.print(" S4:");
+  Serial.print(v4);
+  Serial.print(" SumNorm:");
+  Serial.print(map(sum, 0, 4092, 0, 1023));
+  Serial.print(" Heading:");
+  Serial.println(
+    map((int)(heading * 1000), (int)(-PI * 1000), (int)(PI * 1000), 0, 1023));
+}
+
+// =====================================================
+// GYRO
+// =====================================================
+void updateGyro() {
+  if (bno08x.getSensorEvent(&sensorValue) && sensorValue.sensorId == SH2_GYROSCOPE_UNCALIBRATED) {
+    gyroZ = sensorValue.un.gyroscope.z;
+    unsigned long now = millis();
+    heading = wrapAngle(heading - gyroZ * ((now - lastGyroTime) / 1000.0));
+    lastGyroTime = now;
+  }
+}
+
+void useGyroIntegration() {
+  bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 0);
+  delay(10);
+  bno08x.enableReport(SH2_GYROSCOPE_UNCALIBRATED);
+  delay(50);
+  lastGyroTime = millis();
+  heading = 0;
+}
+
+// =====================================================
+// IR
+// =====================================================
+void updateIR() {
+  auto ema = [](int pin, float prev) {
+    return IR_alpha * (analogRead(pin) * (5.0 / 1024.0)) + (1 - IR_alpha) * prev;
+  };
+  leftAvg = ema(LEFT_IR, leftAvg);
+  rightAvg = ema(RIGHT_IR, rightAvg);
+  frontLeftAvg = ema(FRONT_LEFT_IR, frontLeftAvg);
+  frontRightAvg = ema(FRONT_RIGHT_IR, frontRightAvg);
+}
+
+void warmupIR() {
+  for (int i = 0; i < 50; i++) {
+    updateIR();
+    delay(4);
+  }
+}
+
+// =====================================================
+// MOTORS
+// =====================================================
+void move(int forward, int right, int rotate) {
+  leftFrontMotor.writeMicroseconds(1500 + forward + right - rotate);
+  leftRearMotor.writeMicroseconds(1500 + forward - right - rotate);
+  rightRearMotor.writeMicroseconds(1500 - forward - right - rotate);
+  rightFrontMotor.writeMicroseconds(1500 - forward + right - rotate);
+}
+
+void stopMotors() {
+  leftFrontMotor.writeMicroseconds(1500);
+  leftRearMotor.writeMicroseconds(1500);
+  rightRearMotor.writeMicroseconds(1500);
+  rightFrontMotor.writeMicroseconds(1500);
+}
+
+// =====================================================
+// ULTRASONIC
+// =====================================================
+float getDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  return (pulseIn(echoPin, HIGH) * 0.0343) / 2.0;
+}
+
+// =====================================================
+// LEDs (unchanged)
+// =====================================================
+static int _ledPin(const char* color) {
+  if (strcmp(color, "orange") == 0) return LED_ORANGE;
+  if (strcmp(color, "green") == 0) return LED_GREEN;
+  if (strcmp(color, "blue") == 0) return LED_BLUE;
+  if (strcmp(color, "red") == 0) return LED_RED;
+  return -1;
+}
+
+void LED_Setup() {
+  pinMode(LED_ORANGE, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  digitalWrite(LED_ORANGE, LOW);
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_BLUE, LOW);
+  digitalWrite(LED_RED, LOW);
+
+  digitalWrite(LED_ORANGE, HIGH);
+  delay(100);
+  digitalWrite(LED_GREEN, HIGH);
+  delay(100);
+  digitalWrite(LED_BLUE, HIGH);
+  delay(100);
+  digitalWrite(LED_RED, HIGH);
+  delay(100);
+
+  digitalWrite(LED_ORANGE, LOW);
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_BLUE, LOW);
+  digitalWrite(LED_RED, LOW);
+}
+
+void LED(const char* action, const char* color) {
+  int pin = _ledPin(color);
+  if (pin == -1) return;
+  if (strcmp(action, "on") == 0) digitalWrite(pin, HIGH);
+  else if (strcmp(action, "off") == 0) digitalWrite(pin, LOW);
+  else if (strcmp(action, "toggle") == 0) digitalWrite(pin, !digitalRead(pin));
+}
+
+void LED_Number(float maxBit, int var) {
+  if (var < 0) var = 0;
+  bool orangeOn = var >= (maxBit / 1);
+  if (orangeOn) var -= (maxBit / 1);
+  bool greenOn = var >= (maxBit / 2);
+  if (greenOn) var -= (maxBit / 2);
+  bool blueOn = var >= (maxBit / 4);
+  if (blueOn) var -= (maxBit / 4);
+  bool redOn = var >= (maxBit / 8);
+  digitalWrite(LED_ORANGE, orangeOn ? HIGH : LOW);
+  digitalWrite(LED_GREEN, greenOn ? HIGH : LOW);
+  digitalWrite(LED_BLUE, blueOn ? HIGH : LOW);
+  digitalWrite(LED_RED, redOn ? HIGH : LOW);
+}
