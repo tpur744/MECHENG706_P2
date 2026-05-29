@@ -787,10 +787,10 @@ void warmupIR() { for (int i = 0; i < 50; i++) { updateIR(); delay(4); } }
 // MOTORS
 // =====================================================
 void move(int forward, int right, int rotate) {
-  leftFrontMotor.writeMicroseconds( 1500 + (forward + right - rotate));
-  leftRearMotor.writeMicroseconds(  1500 + forward - right - rotate);
-  rightRearMotor.writeMicroseconds( 1500 - forward - right - rotate);
-  rightFrontMotor.writeMicroseconds(1500 - forward + right - rotate);
+  leftFrontMotor.writeMicroseconds(1500 + 1*(forward + right - rotate));
+  leftRearMotor.writeMicroseconds(1500 + 1*(forward - right - rotate));
+  rightRearMotor.writeMicroseconds(1500 - 1*(forward + right + rotate));
+  rightFrontMotor.writeMicroseconds(1500 - 1*(forward - right + rotate));
 }
 
 void stopMotors() {
