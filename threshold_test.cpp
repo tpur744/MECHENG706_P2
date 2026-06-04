@@ -1,8 +1,8 @@
 // ─── Pin Definitions ───────────────────────────────────────────────────────────
-#define LED_ORANGE  10
+#define LED_RED 10
 #define LED_GREEN   11
 #define LED_BLUE    12
-#define LED_RED     13
+#define LED_YELLOW     13
 
 // Phototransistor pins
 const int sensor1 = A8;   // LEFTMOST
@@ -21,35 +21,35 @@ const int sensor4 = A11;  // RIGHTMOST
 
 // ─── Internal Helper ───────────────────────────────────────────────────────────
 static int _ledPin(const char* color) {
-  if (strcmp(color, "orange") == 0) return LED_ORANGE;
+  if (strcmp(color, "red") == 0) return LED_RED;
   if (strcmp(color, "green")  == 0) return LED_GREEN;
   if (strcmp(color, "blue")   == 0) return LED_BLUE;
-  if (strcmp(color, "red")    == 0) return LED_RED;
+  if (strcmp(color, "yellow")    == 0) return LED_YELLOW;
   return -1;
 }
 
 // ─── LED Setup & Startup Sequence ──────────────────────────────────────────────
 void LED_Setup() {
-  pinMode(LED_ORANGE, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN,  OUTPUT);
   pinMode(LED_BLUE,   OUTPUT);
-  pinMode(LED_RED,    OUTPUT);
+  pinMode(LED_YELLOW,    OUTPUT);
 
-  digitalWrite(LED_ORANGE, LOW);
+  digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN,  LOW);
   digitalWrite(LED_BLUE,   LOW);
-  digitalWrite(LED_RED,    LOW);
+  digitalWrite(LED_YELLOW,    LOW);
 
   // Startup sequence
-  digitalWrite(LED_ORANGE, HIGH); delay(100);
+  digitalWrite(LED_RED, HIGH); delay(100);
   digitalWrite(LED_GREEN,  HIGH); delay(100);
   digitalWrite(LED_BLUE,   HIGH); delay(100);
-  digitalWrite(LED_RED,    HIGH); delay(100);
+  digitalWrite(LED_YELLOW,    HIGH); delay(100);
 
-  digitalWrite(LED_ORANGE, LOW);
+  digitalWrite(LED_RED, LOW);
   digitalWrite(LED_GREEN,  LOW);
   digitalWrite(LED_BLUE,   LOW);
-  digitalWrite(LED_RED,    LOW);
+  digitalWrite(LED_YELLOW,    LOW);
 }
 
 // ─── LED Control ───────────────────────────────────────────────────────────────
@@ -68,10 +68,10 @@ void LED(const char* action, const char* color) {
 
 // ─── All LEDs On/Off ───────────────────────────────────────────────────────────
 void LED_AllSet(bool state) {
-  digitalWrite(LED_ORANGE, state ? HIGH : LOW);
+  digitalWrite(LED_RED, state ? HIGH : LOW);
   digitalWrite(LED_GREEN,  state ? HIGH : LOW);
   digitalWrite(LED_BLUE,   state ? HIGH : LOW);
-  digitalWrite(LED_RED,    state ? HIGH : LOW);
+  digitalWrite(LED_YELLOW,    state ? HIGH : LOW);
 }
 
 // ─── Setup ─────────────────────────────────────────────────────────────────────
@@ -92,8 +92,21 @@ bool flashState = false;
 
 void loop() {
   float threshold = 900;
-  digitalWrite(LED_ORANGE, analogRead(sensor1) > threshold ? HIGH : LOW);
-  digitalWrite(LED_GREEN,  analogRead(sensor2) > threshold ? HIGH : LOW);
-  digitalWrite(LED_BLUE,   analogRead(sensor3) > threshold ? HIGH : LOW);
-  digitalWrite(LED_RED,    analogRead(sensor4) > threshold ? HIGH : LOW);
+  
+  int v1 = analogRead(sensor1);
+  int v2 = analogRead(sensor2);
+  int v3 = analogRead(sensor3);
+  int v4 = analogRead(sensor4);
+
+  digitalWrite(LED_RED,    v1 > threshold ? HIGH : LOW);
+  digitalWrite(LED_GREEN,  v2 > threshold ? HIGH : LOW);
+  digitalWrite(LED_BLUE,   v3 > threshold ? HIGH : LOW);
+  digitalWrite(LED_YELLOW, v4 > threshold ? HIGH : LOW);
+
+  Serial.print("A8 (LEFTMOST): ");    Serial.print(v1);
+  Serial.print("  A9 (SECOND LEFT): "); Serial.print(v2);
+  Serial.print("  A10 (SECOND RIGHT): "); Serial.print(v3);
+  Serial.print("  A11 (RIGHTMOST): ");  Serial.println(v4);
+
+  delay(100);
 }
